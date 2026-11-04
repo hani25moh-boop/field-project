@@ -1,0 +1,28 @@
+name: Patch and Build
+on:
+  push:
+    branches: [main]
+    paths: ['patch-*.zip']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+      - name: Show signing certificate
+        run: keytool -printcert -jarfile app/build/outputs/apk/debug/app-debug.apk | grep -E "SHA256|Owner"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FieldReport-v4-apk
+          path: app/build/outputs/apk/debug/*.apk
