@@ -21,7 +21,7 @@ jobs:
       - name: Build APK
         run: gradle assembleDebug --no-daemon --stacktrace
       - name: Show signing certificate
-        run: keytool -printcert -jarfile app/build/outputs/apk/debug/app-debug.apk | grep -E "SHA256|Owner"
+        run: keytool -printcert -jarfile app/build/outputs/apk/debug/app-debug.apk | grep -E "SHA256|Owner" || true
       - uses: actions/upload-artifact@v4
         with:
           name: FieldReport-v4-apk
