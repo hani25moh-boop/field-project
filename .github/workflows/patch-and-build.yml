@@ -11,6 +11,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Apply patch zips (if any)
+        run: |
+          zips=$(ls patch-*.zip 2>/dev/null | sort -V || true)
+          if [ -n "$zips" ]; then
+            for z in $zips; do unzip -o "$z"; done
+            git config user.name "github-actions"
+            git config user.email "github-actions@users.noreply.github.com"
+            git rm -q $zips
+            git add -A
+            git commit -m "Apply $zips [skip ci]"
+            git push
+          else
+            echo "No patch zip found; building the current code."
+          fi
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -24,5 +38,5 @@ jobs:
         run: keytool -printcert -jarfile app/build/outputs/apk/debug/app-debug.apk | grep -E "SHA256|Owner" || true
       - uses: actions/upload-artifact@v4
         with:
-          name: FieldReport-v4-apk
+          name: FieldReport-apk
           path: app/build/outputs/apk/debug/*.apk
