@@ -7,6 +7,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -56,6 +57,13 @@ private fun typeFor(r: String) = when (r) {
     else -> "Quantity"
 }
 
+private fun typeLabel(t: String) = when (t) {
+    "Material" -> "تسجيل حركة المواد"
+    "Issue" -> "تسجيل البلاغات والملاحظات"
+    "Progress" -> "تسجيل المتابعة ونسب الإنجاز"
+    else -> "تسجيل الكميات المنفذة"
+}
+
 /** Items shown for a role. Falls back to all items so nobody is ever blocked from saving. */
 private fun itemsFor(role: String, all: List<Item>): List<Item> {
     val keys: Set<String> = when (role) {
@@ -83,16 +91,50 @@ class MainActivity : ComponentActivity() {
 fun App(vm: MainViewModel = viewModel()) {
     var role by rememberSaveable { mutableStateOf<String?>(null) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
+    var showExport by rememberSaveable { mutableStateOf(false) }
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val msg by vm.message.collectAsState()
     val settings by vm.settings.collectAsState()
+    val allEntries by vm.entries.collectAsState()
+    val lastExport by vm.lastExport.collectAsState()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { u ->
         u?.let { vm.importFile(ctx.contentResolver, it) }
     }
-    LaunchedEffect(msg) { if (msg.isNotBlank()) Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show() }
+    LaunchedEffect(msg) {
+        if (msg.isNotBlank()) {
+            Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+            vm.clearMessage()
+        }
+    }
 
     val needSetup = settings.userName.isBlank() || settings.userTitle.isBlank() || settings.projectCode.isBlank()
+    val pending = allEntries.count { it.eventAt > lastExport }
+
+    val doExport: (String?) -> Unit = { day ->
+        scope.launch {
+            try { vm.export(day)?.let { share(ctx, it) } }
+            catch (e: Exception) { Toast.makeText(ctx, "تعذر التصدير: ${e.message}", Toast.LENGTH_LONG).show() }
+        }
+    }
+
+    // Phone back button: settings -> previous screen, role screen -> role list (instead of closing the app).
+    BackHandler(enabled = !needSetup && (showSettings || role != null)) {
+        if (showSettings) showSettings = false else role = null
+    }
+
+    if (showExport) AlertDialog(
+        onDismissRequest = { showExport = false },
+        title = { Text("تصدير ملف Excel") },
+        text = { Text("«تقرير اليوم» يصدّر سجلات تاريخ اليوم فقط. «كل السجلات» يصدّر كل ما في هذا الجهاز.") },
+        confirmButton = { TextButton({ showExport = false; doExport(LocalDate.now().toString()) }) { Text("تقرير اليوم") } },
+        dismissButton = {
+            Row {
+                TextButton({ showExport = false; doExport(null) }) { Text("كل السجلات") }
+                TextButton({ showExport = false }) { Text("إلغاء") }
+            }
+        }
+    )
 
     Scaffold(
         topBar = {
@@ -104,12 +146,7 @@ fun App(vm: MainViewModel = viewModel()) {
         bottomBar = {
             if (!needSetup) NavigationBar {
                 NavigationBarItem(selected = false, onClick = { picker.launch(arrayOf("*/*")) }, icon = {}, label = { Text("استيراد") })
-                NavigationBarItem(selected = false, onClick = {
-                    scope.launch {
-                        try { share(ctx, vm.export()) }
-                        catch (e: Exception) { Toast.makeText(ctx, "تعذر التصدير: ${e.message}", Toast.LENGTH_LONG).show() }
-                    }
-                }, icon = {}, label = { Text("تصدير") })
+                NavigationBarItem(selected = false, onClick = { showExport = true }, icon = {}, label = { Text("تصدير") })
                 NavigationBarItem(selected = showSettings, onClick = { showSettings = !showSettings }, icon = {}, label = { Text("الإعدادات") })
             }
         }
@@ -119,7 +156,7 @@ fun App(vm: MainViewModel = viewModel()) {
             needSetup || showSettings -> SettingsScreen(settings, needSetup, mod) {
                 vm.saveSettings(it); showSettings = false
             }
-            role == null -> RolePicker(settings, mod) { role = it }
+            role == null -> RolePicker(settings, mod, pending, lastExport) { role = it }
             else -> EntryScreen(role!!, vm, mod)
         }
     }
@@ -136,6 +173,7 @@ fun SettingsScreen(s: Settings, firstRun: Boolean, mod: Modifier, onSave: (Setti
     var projectNameAr by rememberSaveable { mutableStateOf(s.projectNameAr) }
     var titleMenu by remember { mutableStateOf(false) }
     val ctx = LocalContext.current
+    val ver = remember { runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull().orEmpty() }
     LazyColumn(mod.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             Text(if (firstRun) "الإعداد الأولي" else "الإعدادات", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -165,23 +203,31 @@ fun SettingsScreen(s: Settings, firstRun: Boolean, mod: Modifier, onSave: (Setti
                 else onSave(Settings(userName.trim(), userTitle.trim(), company.trim(), orgCode.trim(), projectCode.trim(), projectName.trim(), projectNameAr.trim()))
             }, Modifier.fillMaxWidth()) { Text("حفظ") }
         }
+        item { Text("الإصدار: $ver", style = MaterialTheme.typography.bodySmall) }
     }
 }
 
 @Composable
-fun RolePicker(s: Settings, mod: Modifier, on: (String) -> Unit) {
+fun RolePicker(s: Settings, mod: Modifier, pending: Int, lastExport: String, on: (String) -> Unit) {
     LazyColumn(mod.fillMaxSize().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
             Image(painterResource(com.newapp.fieldreport.R.drawable.fieldreport_logo), "شعار Field Report", Modifier.size(86.dp), contentScale = ContentScale.Fit)
             Text("Field Report", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
             Text("${s.userName} — ${s.userTitle}")
             Text("المشروع: ${s.projectCode}", style = MaterialTheme.typography.bodySmall)
+            if (pending > 0) {
+                Text(
+                    "سجلات لم تُصدَّر بعد: $pending" + (if (lastExport.isNotBlank()) " — آخر تصدير: $lastExport" else ""),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
         }
         items(roles) { r ->
             Card(onClick = { on(r) }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
                 Column(Modifier.padding(18.dp)) {
                     Text(r, fontWeight = FontWeight.Bold)
-                    Text("فتح واجهة ${typeFor(r)}", style = MaterialTheme.typography.bodySmall)
+                    Text(typeLabel(typeFor(r)), style = MaterialTheme.typography.bodySmall)
                 }
             }
         }

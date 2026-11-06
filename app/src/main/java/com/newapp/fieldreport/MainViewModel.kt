@@ -42,6 +42,13 @@ class MainViewModel(a: Application) : AndroidViewModel(a) {
     private val _settings = MutableStateFlow(loadSettings())
     val settings: StateFlow<Settings> = _settings
 
+    /** Time of the last export (yyyy-MM-dd HH:mm), used to warn about records that were never exported. */
+    private val _lastExport = MutableStateFlow(prefs.getString("lastExportAt", "").orEmpty())
+    val lastExport: StateFlow<String> = _lastExport
+
+    /** Called after a message was shown, so the same message can be shown again later. */
+    fun clearMessage() { _message.value = "" }
+
     init {
         // First run: give the app a generic project and a starter item list for every role.
         viewModelScope.launch(Dispatchers.IO) {
@@ -118,13 +125,20 @@ class MainViewModel(a: Application) : AndroidViewModel(a) {
         return LocalDate.of(1899, 12, 30).plusDays(days).atStartOfDay().plusSeconds(secs).format(fmt)
     }
 
+    /** Same idea for a date-only column: Excel serial number -> yyyy-MM-dd. */
+    private fun excelDay(s: String): String {
+        val d = s.toDoubleOrNull() ?: return s.take(10)
+        if (d < 20000) return s
+        return LocalDate.of(1899, 12, 30).plusDays(d.toLong()).toString()
+    }
+
     private fun rowToEntry(r: List<String>) = Entry(
         id = r.getOrNull(0).orEmpty(), role = r.getOrNull(1).orEmpty(), recordType = r.getOrNull(2).orEmpty(),
         projectCode = r.getOrNull(3).orEmpty(), itemCode = r.getOrNull(4).orEmpty(), itemName = r.getOrNull(5).orEmpty(),
         unit = r.getOrNull(6).orEmpty(), quantity = r.getOrNull(7)?.toDoubleOrNull(), hours = r.getOrNull(8)?.toDoubleOrNull(),
         status = r.getOrNull(9).orEmpty(), priority = r.getOrNull(10).orEmpty(), personCode = r.getOrNull(11).orEmpty(),
         personName = r.getOrNull(12).orEmpty(), eventAt = excelDate(r.getOrNull(13).orEmpty()), notes = r.getOrNull(14).orEmpty(),
-        personTitle = r.getOrNull(15).orEmpty(), reportDate = r.getOrNull(16).orEmpty(),
+        personTitle = r.getOrNull(15).orEmpty(), reportDate = excelDay(r.getOrNull(16).orEmpty()),
         latitude = r.getOrNull(17)?.toDoubleOrNull(), longitude = r.getOrNull(18)?.toDoubleOrNull(),
         photoRef = r.getOrNull(19).orEmpty()
     )
@@ -167,12 +181,31 @@ class MainViewModel(a: Application) : AndroidViewModel(a) {
         }
     }
 
-    suspend fun export(): File = withContext(Dispatchers.IO) {
+    /**
+     * Exports the records of one report day (yyyy-MM-dd), or every record when [onlyDate] is null.
+     * Returns null (and shows a message) when there is nothing to export.
+     */
+    suspend fun export(onlyDate: String? = null): File? = withContext<File?>(Dispatchers.IO) {
+        val all = entries.value
+        val list = if (onlyDate == null) all
+                   else all.filter { it.reportDate.ifBlank { it.eventAt.take(10) } == onlyDate }
+        if (list.isEmpty()) {
+            _message.value = "لا توجد سجلات لتصديرها"
+            return@withContext null
+        }
         val dir = File(getApplication<Application>().cacheDir, "exports")
         dir.mkdirs()
-        val stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmm"))
-        val f = File(dir, "FieldReport_Exchange_$stamp.xlsx")
-        XlsxWriter.write(f, projects.value, items.value, entries.value)
+        // Remove old export files (older than one day) so the phone cache does not fill up.
+        dir.listFiles()?.filter { System.currentTimeMillis() - it.lastModified() > 86_400_000L }?.forEach { it.delete() }
+        val now = LocalDateTime.now()
+        val stamp = now.format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmm"))
+        val code = _settings.value.projectCode.replace(Regex("[^A-Za-z0-9_-]"), "").ifBlank { "PRJ" }
+        val tag = onlyDate?.replace("-", "") ?: "ALL"
+        val f = File(dir, "FieldReport_${code}_${tag}_$stamp.xlsx")
+        XlsxWriter.write(f, projects.value, items.value, list)
+        val nowText = now.format(fmt)
+        prefs.edit().putString("lastExportAt", nowText).apply()
+        _lastExport.value = nowText
         f
     }
 }
